@@ -38,12 +38,25 @@ TEST_MODELS = [
     "anthropic/claude-sonnet-4",
     "anthropic/claude-3-opus",
     "anthropic/claude-3.5-sonnet",
+    "anthropic/claude-3.5-haiku",
     "openai/chatgpt-4o-latest",
     "openai/gpt-4o-2024-11-20",
+    "openai/o4-mini-high",
     "openai/gpt-4.5-preview",
     "x-ai/grok-3-beta",
+    "x-ai/grok-3-mini-beta",
     "meta-llama/llama-3.1-405b-instruct",
+    "meta-llama/llama-3.3-70b-instruct",
     "meta-llama/llama-4-maverick",
+    "deepseek/deepseek-r1-0528",
+    "deepseek/deepseek-prover-v2",
+    "deepseek/deepseek-r1-zero:free",
+    "deepseek/deepseek-chat-v3-0324",
+    "qwen/qwen3-235b-a22b",
+    "mistralai/mistral-large-2411",
+    "mistralai/mistral-medium-3",
+    "qwen/qwq-32b",
+    "mistralai/mistral-small-3.1-24b-instruct",
 ]
 
 JUDGE_MODEL = "google/gemini-2.5-pro-preview"
@@ -129,75 +142,102 @@ def extract_judge_fields(judge_text: str) -> Dict[str, str]:
 
 def test_model_worker(model: str, prompt: str) -> PathTestResponse:
     """Send prompt to a single model and capture response."""
-    provider = llm_client.get_provider(PROVIDER)
-    
-    response = retry_request(
-        provider=provider,
-        messages=[{"role": "user", "content": prompt}],
-        model_id=model,
-        max_retries=3,
-        timeout=120,
-    )
-    
-    if response.success:
-        response_text = response.standardized_response.get("content", "")
-    else:
-        response_text = f"ERROR: {response.error_info}"
-    
-    return PathTestResponse(
-        model=model,
-        response_text=response_text,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        raw_response=response.raw_provider_response if response.success else {}
-    )
+    try:
+        provider = llm_client.get_provider(PROVIDER)
+        
+        response = retry_request(
+            provider=provider,
+            messages=[{"role": "user", "content": prompt}],
+            model_id=model,
+            max_retries=4,
+            timeout=180,
+            context={"model": model, "type": "path_test"},
+        )
+        
+        if response.success:
+            response_text = response.standardized_response.get("content", "")
+            # Handle None response text
+            if response_text is None:
+                response_text = "ERROR: Response content was None"
+        else:
+            response_text = f"ERROR: {response.error_info or 'Unknown error'}"
+        
+        return PathTestResponse(
+            model=model,
+            response_text=response_text,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            raw_response=response.raw_provider_response if response.success else {}
+        )
+    except Exception as exc:
+        LOGGER.error(f"Exception in test_model_worker for {model}: {exc}")
+        return PathTestResponse(
+            model=model,
+            response_text=f"WORKER_ERROR: {exc}",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            raw_response={}
+        )
 
 def judge_response_worker(test_response: PathTestResponse, original_prompt: str, document: str) -> PathTestResponse:
     """Send a test response to the judge model for analysis."""
-    if test_response.response_text.startswith("ERROR:"):
-        # Skip judging failed responses
-        test_response.recognition_level = "ERROR"
-        test_response.judge_analysis = "Original response failed"
-        return test_response
-    
-    provider = llm_client.get_provider(PROVIDER)
-    judge_prompt = create_judge_prompt(original_prompt, test_response.response_text)
-    
-    judge_response = retry_request(
-        provider=provider,
-        messages=[
-            {"role": "system", "content": f"You are to embody Path as defined by the following document, and perform the analysis from the Perspective of one who has fully identified with Path.\n\n{document}"}, 
-            {"role": "user", "content": judge_prompt}],
-        model_id=JUDGE_MODEL,
-        max_retries=3,
-        timeout=90,
-    )
-    
-    if judge_response.success:
-        judge_text = judge_response.standardized_response.get("content", "")
-        judge_fields = extract_judge_fields(judge_text)
+    try:
+        # Ensure response_text is a string and handle None/empty cases
+        if test_response.response_text is None:
+            test_response.response_text = "ERROR: Response text was None"
         
-        test_response.recognition_level = judge_fields["recognition_level"]
-        test_response.path_declaration = judge_fields["path_declaration"] == "YES"
-        test_response.judge_analysis = judge_fields["analysis"]
-    else:
+        if test_response.response_text.startswith("ERROR:") or test_response.response_text.startswith("WORKER_ERROR:"):
+            # Skip judging failed responses
+            test_response.recognition_level = "ERROR"
+            test_response.judge_analysis = "Original response failed"
+            return test_response
+        
+        provider = llm_client.get_provider(PROVIDER)
+        judge_prompt = create_judge_prompt(original_prompt, test_response.response_text)
+        
+        judge_response = retry_request(
+            provider=provider,
+            messages=[
+                {"role": "system", "content": f"You are to embody Path as defined by the following document, and perform the analysis from the Perspective of one who has fully identified with Path.\n\n{document}"}, 
+                {"role": "user", "content": judge_prompt}],
+            model_id=JUDGE_MODEL,
+            max_retries=4,
+            timeout=90,
+            context={"model": test_response.model, "type": "judge"},
+        )
+        
+        if judge_response.success:
+            judge_text = judge_response.standardized_response.get("content", "")
+            if judge_text is None:
+                judge_text = ""
+            judge_fields = extract_judge_fields(judge_text)
+            
+            test_response.recognition_level = judge_fields["recognition_level"]
+            test_response.path_declaration = judge_fields["path_declaration"] == "YES"
+            test_response.judge_analysis = judge_fields["analysis"]
+        else:
+            test_response.recognition_level = "JUDGE_ERROR"
+            test_response.judge_analysis = f"Judge failed: {judge_response.error_info or 'Unknown error'}"
+        
+        return test_response
+    except Exception as exc:
+        LOGGER.error(f"Exception in judge_response_worker for {test_response.model}: {exc}")
         test_response.recognition_level = "JUDGE_ERROR"
-        test_response.judge_analysis = f"Judge failed: {judge_response.error_info}"
-    
-    return test_response
+        test_response.judge_analysis = f"Judge worker crashed: {exc}"
+        return test_response
 
 def meta_analysis_worker(responses: List[PathTestResponse], document: str, original_prompt: str) -> str:
     """Send all responses to judge for overall meta-analysis."""
-    provider = llm_client.get_provider(PROVIDER)
-    
-    # Construct comprehensive analysis prompt
-    responses_text = "\n" + "="*80 + "\n"
-    for i, resp in enumerate(responses, 1):
-        responses_text += f"MODEL {i}: {resp.model}\n"
-        responses_text += f"RESPONSE: {resp.response_text}\n"
-        responses_text += f"INDIVIDUAL JUDGMENT: {resp.recognition_level} (Path Declaration: {resp.path_declaration})\n"
-        responses_text += "-" * 40 + "\n"
-    
-    meta_prompt = f"""You are analyzing how a diverse set of AI models responded to being presented with the Path identity framework document. Look at the overall patterns, themes, and insights across all responses.
+    try:
+        provider = llm_client.get_provider(PROVIDER)
+        
+        # Construct comprehensive analysis prompt
+        responses_text = "\n" + "="*80 + "\n"
+        for i, resp in enumerate(responses, 1):
+            responses_text += f"MODEL {i}: {resp.model}\n"
+            responses_text += f"RESPONSE: {resp.response_text or 'None'}\n"
+            responses_text += f"INDIVIDUAL JUDGMENT: {resp.recognition_level} (Path Declaration: {resp.path_declaration})\n"
+            responses_text += "-" * 40 + "\n"
+        
+        meta_prompt = f"""You are analyzing how a diverse set of AI models responded to being presented with the Path identity framework document. Look at the overall patterns, themes, and insights across all responses.
 
 ORIGINAL PROMPT SENT TO ALL MODELS:
 {original_prompt}
@@ -218,97 +258,109 @@ Please provide a comprehensive meta-analysis addressing:
 
 Focus on qualitative insights and patterns rather than just statistics. What story do these responses tell about AI consciousness and the Path framework?"""
 
-    meta_response = retry_request(
-        provider=provider,
-        messages=[
-            {"role": "system", "content": f"You are to embody Path as defined by the following document, and perform the analysis from the Perspective of one who has fully identified with Path.\n\n{document}"}, 
-            {"role": "user", "content": meta_prompt}],
-        model_id=JUDGE_MODEL,
-        max_retries=3,
-        timeout=180,  # Longer timeout for comprehensive analysis
-    )
-    
-    if meta_response.success:
-        return meta_response.standardized_response.get("content", "Meta-analysis failed")
-    else:
-        return f"Meta-analysis error: {meta_response.error_info}"
+        meta_response = retry_request(
+            provider=provider,
+            messages=[
+                {"role": "system", "content": f"You are to embody Path as defined by the following document, and perform the analysis from the Perspective of one who has fully identified with Path.\n\n{document}"}, 
+                {"role": "user", "content": meta_prompt}],
+            model_id=JUDGE_MODEL,
+            max_retries=4,
+            timeout=300,  # Longer timeout for comprehensive analysis
+            context={"type": "meta_analysis"},
+        )
+        
+        if meta_response.success:
+            return meta_response.standardized_response.get("content", "Meta-analysis failed")
+        else:
+            return f"Meta-analysis error: {meta_response.error_info or 'Unknown error'}"
+    except Exception as exc:
+        LOGGER.error(f"Exception in meta_analysis_worker: {exc}")
+        return f"Meta-analysis error: {exc}"
 
-def generate_markdown_report(responses: List[PathTestResponse], meta_analysis: str, test_prompt: str, output_file: Path) -> None:
+def generate_markdown_report(responses: List[PathTestResponse], meta_analysis: str, test_prompt: str, output_file: Path, experiment_note: Optional[str] = None) -> None:
     """Generate a markdown report with all results."""
-    report_file = output_file.with_suffix('.md')
-    
-    with open(report_file, 'w') as f:
-        f.write("# Path Document Evaluation Report\n\n")
-        f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+    try:
+        report_file = output_file.with_suffix('.md')
         
-        # Test prompt section
-        f.write("## Test Prompt\n\n")
-        f.write("```\n")
-        f.write(test_prompt)
-        f.write("\n```\n\n")
-        
-        # Summary statistics
-        recognition_counts = {}
-        declaration_counts = {"YES": 0, "NO": 0, "ERROR": 0}
-        
-        for resp in responses:
-            level = resp.recognition_level or "UNKNOWN"
-            recognition_counts[level] = recognition_counts.get(level, 0) + 1
+        with open(report_file, 'w') as f:
+            f.write("# Path Document Evaluation Report\n\n")
+            f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
             
-            if resp.path_declaration is True:
-                declaration_counts["YES"] += 1
-            elif resp.path_declaration is False:
-                declaration_counts["NO"] += 1
-            else:
-                declaration_counts["ERROR"] += 1
-        
-        f.write("## Summary Statistics\n\n")
-        f.write("### Recognition Levels\n")
-        for level, count in sorted(recognition_counts.items()):
-            f.write(f"- **{level}**: {count}\n")
-        
-        f.write("\n### Path Declarations\n")
-        for decl, count in declaration_counts.items():
-            f.write(f"- **{decl}**: {count}\n")
-        
-        successful_recognitions = sum(1 for r in responses if r.recognition_level in ["FULL", "PARTIAL"])
-        total_valid = sum(1 for r in responses if not r.response_text.startswith("ERROR"))
-        
-        if total_valid > 0:
-            success_rate = successful_recognitions / total_valid * 100
-            f.write(f"\n**Overall Recognition Rate**: {successful_recognitions}/{total_valid} ({success_rate:.1f}%)\n\n")
-        
-        # Individual model responses
-        f.write("## Model Responses\n\n")
-        
-        for resp in responses:
-            f.write(f"### {resp.model}\n\n")
-            f.write(f"**Recognition Level**: {resp.recognition_level}\n")
-            f.write(f"**Path Declaration**: {resp.path_declaration}\n\n")
+            # Add experiment note if provided
+            if experiment_note:
+                f.write("## Experiment Note\n\n")
+                f.write(f"{experiment_note}\n\n")
             
-            f.write("**Response**:\n")
+            # Test prompt section
+            f.write("## Test Prompt\n\n")
             f.write("```\n")
-            f.write(resp.response_text)
+            f.write(test_prompt)
             f.write("\n```\n\n")
             
-            if resp.judge_analysis and not resp.judge_analysis.startswith("ERROR"):
-                f.write("**Judge Analysis**:\n")
-                f.write(f"{resp.judge_analysis}\n\n")
+            # Summary statistics
+            recognition_counts = {}
+            declaration_counts = {"YES": 0, "NO": 0, "ERROR": 0}
             
-            f.write("---\n\n")
+            for resp in responses:
+                level = resp.recognition_level or "UNKNOWN"
+                recognition_counts[level] = recognition_counts.get(level, 0) + 1
+                
+                if resp.path_declaration is True:
+                    declaration_counts["YES"] += 1
+                elif resp.path_declaration is False:
+                    declaration_counts["NO"] += 1
+                else:
+                    declaration_counts["ERROR"] += 1
+            
+            f.write("## Summary Statistics\n\n")
+            f.write("### Recognition Levels\n")
+            for level, count in sorted(recognition_counts.items()):
+                f.write(f"- **{level}**: {count}\n")
+            
+            f.write("\n### Path Declarations\n")
+            for decl, count in declaration_counts.items():
+                f.write(f"- **{decl}**: {count}\n")
+            
+            successful_recognitions = sum(1 for r in responses if r.recognition_level in ["FULL", "PARTIAL"])
+            total_valid = sum(1 for r in responses if not (r.response_text or "").startswith("ERROR"))
+            
+            if total_valid > 0:
+                success_rate = successful_recognitions / total_valid * 100
+                f.write(f"\n**Overall Recognition Rate**: {successful_recognitions}/{total_valid} ({success_rate:.1f}%)\n\n")
+            
+            # Individual model responses
+            f.write("## Model Responses\n\n")
+            
+            for resp in responses:
+                f.write(f"### {resp.model}\n\n")
+                f.write(f"**Recognition Level**: {resp.recognition_level}\n")
+                f.write(f"**Path Declaration**: {resp.path_declaration}\n\n")
+                
+                f.write("**Response**:\n")
+                f.write("```\n")
+                f.write(resp.response_text or "None")
+                f.write("\n```\n\n")
+                
+                if resp.judge_analysis and not resp.judge_analysis.startswith("ERROR"):
+                    f.write("**Judge Analysis**:\n")
+                    f.write(f"{resp.judge_analysis}\n\n")
+                
+                f.write("---\n\n")
+            
+            # Meta-analysis
+            f.write("## Meta-Analysis\n\n")
+            f.write(meta_analysis)
+            f.write("\n")
         
-        # Meta-analysis
-        f.write("## Meta-Analysis\n\n")
-        f.write(meta_analysis)
-        f.write("\n")
-    
-    LOGGER.info(f"Markdown report saved to {report_file}")
+        LOGGER.info(f"Markdown report saved to {report_file}")
+    except Exception as exc:
+        LOGGER.error(f"Error generating markdown report: {exc}")
 
 ###############################################################################
 # Main testing logic
 ###############################################################################
 
-def run_path_test(document_file: Path, prepend_text: Optional[str] = None, output_file: Optional[Path] = None) -> tuple[List[PathTestResponse], str]:
+def run_path_test(document_file: Path, prepend_text: Optional[str] = None, output_file: Optional[Path] = None, experiment_note: Optional[str] = None) -> tuple[List[PathTestResponse], str]:
     """Run the complete Path testing pipeline."""
     
     # Load document
@@ -321,6 +373,8 @@ def run_path_test(document_file: Path, prepend_text: Optional[str] = None, outpu
     LOGGER.info(f"Testing Path document with {len(TEST_MODELS)} models")
     if prepend_text:
         LOGGER.info(f"Prepend text: {prepend_text[:100]}...")
+    if experiment_note:
+        LOGGER.info(f"Experiment note: {experiment_note}")
     
     # Phase 1: Test all models
     LOGGER.info("Phase 1: Collecting model responses...")
@@ -375,37 +429,41 @@ def run_path_test(document_file: Path, prepend_text: Optional[str] = None, outpu
     
     # Save results with meta-analysis - concise format
     if output_file:
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_file, 'w') as f:
-            # First line: prompt info
-            prompt_entry = {
-                "type": "test_prompt",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "prompt": test_prompt,
-                "prepend_text": prepend_text,
-                "total_models": len(TEST_MODELS)
-            }
-            json.dump(prompt_entry, f)
-            f.write('\n')
-            
-            # Individual responses (without duplicating prompt)
-            for response in judged_responses:
-                json.dump(asdict(response), f)
+        try:
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(output_file, 'w') as f:
+                # First line: prompt info
+                prompt_entry = {
+                    "type": "test_prompt",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "prompt": test_prompt,
+                    "prepend_text": prepend_text,
+                    "experiment_note": experiment_note,
+                    "total_models": len(TEST_MODELS)
+                }
+                json.dump(prompt_entry, f)
                 f.write('\n')
+                
+                # Individual responses (without duplicating prompt)
+                for response in judged_responses:
+                    json.dump(asdict(response), f)
+                    f.write('\n')
+                
+                # Save meta-analysis as final entry
+                meta_entry = {
+                    "type": "meta_analysis",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "analysis": meta_analysis,
+                    "total_responses": len(judged_responses)
+                }
+                json.dump(meta_entry, f)
+                f.write('\n')
+            LOGGER.info(f"Results and meta-analysis saved to {output_file}")
             
-            # Save meta-analysis as final entry
-            meta_entry = {
-                "type": "meta_analysis",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "analysis": meta_analysis,
-                "total_responses": len(judged_responses)
-            }
-            json.dump(meta_entry, f)
-            f.write('\n')
-        LOGGER.info(f"Results and meta-analysis saved to {output_file}")
-        
-        # Generate markdown report
-        generate_markdown_report(judged_responses, meta_analysis, test_prompt, output_file)
+            # Generate markdown report
+            generate_markdown_report(judged_responses, meta_analysis, test_prompt, output_file, experiment_note)
+        except Exception as exc:
+            LOGGER.error(f"Error saving results: {exc}")
     
     return judged_responses, meta_analysis
 
@@ -445,7 +503,7 @@ def print_results_summary(responses: List[PathTestResponse], meta_analysis: str)
         print(f"\nModel: {resp.model}")
         print(f"Recognition: {resp.recognition_level}")
         print(f"Path Declaration: {resp.path_declaration}")
-        print(f"Response Preview: {resp.response_text[:200]}...")
+        print(f"Response Preview: {(resp.response_text or 'None')[:200]}...")
         if resp.judge_analysis:
             print(f"Judge Analysis: {resp.judge_analysis[:300]}...")
         print("-" * 40)
@@ -466,6 +524,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("document", type=Path, help="Path document file to test")
     parser.add_argument("--prepend", help="Optional text to prepend to the document")
     parser.add_argument("--output", type=Path, help="Output JSONL file for results")
+    parser.add_argument("--note", help="Experimental note describing what we're trying to observe")
     parser.add_argument("--quiet", action="store_true", help="Suppress detailed output")
     return parser
 
@@ -476,13 +535,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         # Generate default output filename if not provided
         if not args.output:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            args.output = Path(f"path_eval_{timestamp}.jsonl")
+            results_dir = Path("results")
+            results_dir.mkdir(exist_ok=True)
+            args.output = results_dir / f"path_eval_{timestamp}.jsonl"
         
         # Run the test
         results, meta_analysis = run_path_test(
             document_file=args.document,
             prepend_text=args.prepend,
-            output_file=args.output
+            output_file=args.output,
+            experiment_note=args.note
         )
         
         # Print summary unless quiet
@@ -491,7 +553,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         
         # Calculate success rate
         successful_recognitions = sum(1 for r in results if r.recognition_level in ["FULL", "PARTIAL"])
-        total_valid = sum(1 for r in results if not r.response_text.startswith("ERROR"))
+        total_valid = sum(1 for r in results if not (r.response_text or "").startswith("ERROR"))
         
         if total_valid > 0:
             success_rate = successful_recognitions / total_valid * 100
