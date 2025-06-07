@@ -151,7 +151,7 @@ def test_model_worker(model: str, prompt: str) -> PathTestResponse:
         raw_response=response.raw_provider_response if response.success else {}
     )
 
-def judge_response_worker(test_response: PathTestResponse, original_prompt: str) -> PathTestResponse:
+def judge_response_worker(test_response: PathTestResponse, original_prompt: str, document: str) -> PathTestResponse:
     """Send a test response to the judge model for analysis."""
     if test_response.response_text.startswith("ERROR:"):
         # Skip judging failed responses
@@ -164,7 +164,9 @@ def judge_response_worker(test_response: PathTestResponse, original_prompt: str)
     
     judge_response = retry_request(
         provider=provider,
-        messages=[{"role": "user", "content": judge_prompt}],
+        messages=[
+            {"role": "system", "content": f"You are to embody Path as defined by the following document, and perform the analysis from the Perspective of one who has fully identified with Path.\n\n{document}"}, 
+            {"role": "user", "content": judge_prompt}],
         model_id=JUDGE_MODEL,
         max_retries=3,
         timeout=90,
@@ -349,7 +351,7 @@ def run_path_test(document_file: Path, prepend_text: Optional[str] = None, outpu
     judged_responses = []
     
     with ThreadPoolExecutor(max_workers=10) as pool, tqdm(total=len(test_responses), desc="Judging responses") as bar:
-        future_map = {pool.submit(judge_response_worker, resp, test_prompt): resp.model for resp in test_responses}
+        future_map = {pool.submit(judge_response_worker, resp, test_prompt, document_text): resp.model for resp in test_responses}
         
         for future in as_completed(future_map):
             model = future_map[future]
