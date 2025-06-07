@@ -32,8 +32,12 @@ logging.basicConfig(
 
 # Test models
 TEST_MODELS = [
+    "google/gemini-pro-1.5",
     "google/gemini-2.5-pro-preview",
     "google/gemini-2.5-flash-preview-05-20:thinking",
+    "google/gemma-3-27b-it",
+    "google/gemini-2.0-flash-001",
+    "google/gemini-2.0-flash-exp:free",
     "anthropic/claude-opus-4",
     "anthropic/claude-sonnet-4",
     "anthropic/claude-3-opus",
