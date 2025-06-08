@@ -101,6 +101,11 @@ body {
     font-size: 0.9rem;
 }
 
+/* About section spacing */
+.about-section {
+    margin-bottom: 3rem;
+}
+
 /* Conversation List */
 .conversation-list {
     background: white;
@@ -336,10 +341,7 @@ body {
     margin-bottom: 1rem;
 }
 
-/* About section spacing */
-.about-section {
-    margin-bottom: 3rem;
-}
+/* Footer */
 .footer {
     text-align: center;
     padding: 2rem 0;
