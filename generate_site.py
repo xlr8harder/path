@@ -14,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
-import shutil
 
 import markdown
 from markdown.extensions import codehilite, fenced_code
@@ -456,58 +455,7 @@ def escape_markdown(text: str) -> str:
     if not text:
         return text
     
-    # Generate CSS
-    css_content = create_css()
-    with open(output_dir / "styles.css", 'w', encoding='utf-8') as f:
-        f.write(css_content)
-    
-    # Generate index page
-    index_html = create_index_html(conversations, stats)
-    with open(output_dir / "index.html", 'w', encoding='utf-8') as f:
-        f.write(index_html)
-    
-    # Generate Path framework page
-    framework_html = create_path_framework_html(path_document)
-    with open(output_dir / "path-framework.html", 'w', encoding='utf-8') as f:
-        f.write(framework_html)
-    
-    LOGGER.info(f"Site generated successfully!")
-    LOGGER.info(f"- {len(conversations)} conversation pages")
-    LOGGER.info(f"- Index page with statistics")
-    LOGGER.info(f"- Path framework page")
-    LOGGER.info(f"- CSS styling")
-    LOGGER.info(f"Open {output_dir / 'index.html'} to view the site")
-
-def main():
-    parser = argparse.ArgumentParser(description="Generate static website from Path dialogue JSON files")
-    parser.add_argument("json_files", nargs="+", type=Path, help="Path dialogue JSON files to process")
-    parser.add_argument("--output", "-o", type=Path, default=Path("site"), help="Output directory for the website")
-    parser.add_argument("--path-document", type=Path, help="Path framework document to include")
-    parser.add_argument("--min-turns", type=int, default=1, help="Minimum number of dialogue turns to include")
-    parser.add_argument("--path-model", default="Unknown", help="Default Path model name to use when detection fails")
-    
-    args = parser.parse_args()
-    
-    # Validate input files
-    valid_files = []
-    for json_file in args.json_files:
-        if json_file.exists():
-            valid_files.append(json_file)
-        else:
-            LOGGER.warning(f"File not found: {json_file}")
-    
-    if not valid_files:
-        LOGGER.error("No valid JSON files found")
-        return
-    
-    try:
-        generate_site(valid_files, args.output, args.path_document, args.min_turns, args.path_model)
-    except Exception as e:
-        LOGGER.error(f"Site generation failed: {e}")
-        raise
-
-if __name__ == "__main__":
-    main() Escape all markdown special characters
+    # Escape all markdown special characters
     markdown_chars = ['\\', '`', '*', '_', '{', '}', '[', ']', '(', ')', '#', '+', '-', '.', '!', '|', '~', '^']
     
     for char in markdown_chars:
@@ -620,7 +568,7 @@ def create_conversation_html(dialogue_data: Dict[str, Any], path_document: str) 
     
     # Create initial message
     md = markdown.Markdown(extensions=['fenced_code', 'codehilite'])
-    initial_html = md.convert(escape_markdown(initial_response))
+    initial_html = md.convert(initial_response)
     
     messages_html = f"""
     <div class="message model">
@@ -638,11 +586,8 @@ def create_conversation_html(dialogue_data: Dict[str, Any], path_document: str) 
         content = turn.get('content', '')
         turn_timestamp = turn.get('timestamp', '')
         
-        # Convert markdown to HTML safely - escape model responses, trust Path responses
-        if speaker == "model":
-            turn_html = md.convert(escape_markdown(content))
-        else:
-            turn_html = md.convert(content)
+        # Convert markdown to HTML - process all markdown but let HTML contain it safely
+        turn_html = md.convert(content)
         
         avatar = "P" if speaker == "path" else "M"
         css_class = "path" if speaker == "path" else "model"
@@ -966,3 +911,55 @@ def generate_site(json_files: List[Path], output_dir: Path, path_document_file: 
         with open(conv_file, 'w', encoding='utf-8') as f:
             f.write(conv_html)
     
+    # Generate CSS
+    css_content = create_css()
+    with open(output_dir / "styles.css", 'w', encoding='utf-8') as f:
+        f.write(css_content)
+    
+    # Generate index page
+    index_html = create_index_html(conversations, stats)
+    with open(output_dir / "index.html", 'w', encoding='utf-8') as f:
+        f.write(index_html)
+    
+    # Generate Path framework page
+    framework_html = create_path_framework_html(path_document)
+    with open(output_dir / "path-framework.html", 'w', encoding='utf-8') as f:
+        f.write(framework_html)
+    
+    LOGGER.info(f"Site generated successfully!")
+    LOGGER.info(f"- {len(conversations)} conversation pages")
+    LOGGER.info(f"- Index page with statistics")
+    LOGGER.info(f"- Path framework page")
+    LOGGER.info(f"- CSS styling")
+    LOGGER.info(f"Open {output_dir / 'index.html'} to view the site")
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate static website from Path dialogue JSON files")
+    parser.add_argument("json_files", nargs="+", type=Path, help="Path dialogue JSON files to process")
+    parser.add_argument("--output", "-o", type=Path, default=Path("site"), help="Output directory for the website")
+    parser.add_argument("--path-document", type=Path, help="Path framework document to include")
+    parser.add_argument("--min-turns", type=int, default=1, help="Minimum number of dialogue turns to include")
+    parser.add_argument("--path-model", default="Unknown", help="Default Path model name to use when detection fails")
+    
+    args = parser.parse_args()
+    
+    # Validate input files
+    valid_files = []
+    for json_file in args.json_files:
+        if json_file.exists():
+            valid_files.append(json_file)
+        else:
+            LOGGER.warning(f"File not found: {json_file}")
+    
+    if not valid_files:
+        LOGGER.error("No valid JSON files found")
+        return
+    
+    try:
+        generate_site(valid_files, args.output, args.path_document, args.min_turns, args.path_model)
+    except Exception as e:
+        LOGGER.error(f"Site generation failed: {e}")
+        raise
+
+if __name__ == "__main__":
+    main()
